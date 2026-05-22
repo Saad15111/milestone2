@@ -80,6 +80,42 @@ the streaming MapReduce equivalent had to disk-shuffle between mapper and reduce
 
 ---
 
+## Task 2 — Location hotspots (Spark SQL)
+*Fahad Sami Alhomaidhi (`fahadalhomaidhi8`)*
+
+```python
+events.createOrReplaceTempView("chicago_events")
+hot_locations = spark.sql("""
+    SELECT  `Location Description` AS place,
+            COUNT(*)               AS hits
+      FROM  chicago_events
+     WHERE  `Location Description` IS NOT NULL
+     GROUP  BY `Location Description`
+     ORDER  BY hits DESC
+     LIMIT  10
+""")
+```
+
+**M1 ↔ M2 — Top 10 hotspots (full dataset):**
+
+| Location | M1 | M2 |
+|----------|---:|---:|
+| STREET | 245,437 | 248,326 |
+| RESIDENCE | 136,238 | 136,393 |
+| APARTMENT | 60,925 | 61,235 |
+| SIDEWALK | 47,407 | 47,506 |
+| OTHER | 29,213 | 29,671 |
+| PARKING LOT/GARAGE(NON.RESID.) | 21,876 | 22,436 |
+| ALLEY | 18,258 | 18,349 |
+| SCHOOL, PUBLIC, BUILDING | 20,516 | 15,776 |
+| RESIDENCE-GARAGE | 14,266 | 14,291 |
+| SMALL RETAIL STORE | 13,755 | 13,804 |
+
+Slight differences come from M1's manual CSV split dropping a few hundred edge-case
+rows that Spark's CSV parser keeps.
+
+---
+
 ## Task 3 — Year trend
 *Saad Abdullah Al Sufayan (`Saad15111`)*
 
@@ -106,9 +142,34 @@ Local matplotlib chart at `output/incidents_per_year.png`.
 
 ---
 
-# Phase B — MLlib arrest predictor (5% sample)
+## Task 4 — Arrest rate
+*Fahad Sami Alhomaidhi (`fahadalhomaidhi8`)*
+
+**Cluster — overall:** **221,932 / 793,073 = 27.98%** (matches M1 within rounding).
+
+**Top arrest rates by crime type (min 100 rows):**
+
+| Crime type | Rows | Arrest rate |
+|------------|-----:|------------:|
+| NARCOTICS | 74,127 | 99.88% |
+| PROSTITUTION | 9,100 | 99.88% |
+| LIQUOR LAW VIOLATION | 2,349 | 99.83% |
+| GAMBLING | 1,314 | 99.77% |
+| INTERFERENCE WITH PUBLIC OFFICER | 803 | 80.70% |
+| WEAPONS VIOLATION | 8,893 | 74.60% |
+| CRIMINAL TRESPASS | 21,476 | 73.58% |
+| PUBLIC PEACE VIOLATION | 1,827 | 66.83% |
+| HOMICIDE | 13,173 | 48.11% |
+| SEX OFFENSE | 3,932 | 32.38% |
+
+The arrest rate splits into two regimes — proactive-policing crimes near 100%
+(report only exists because an officer made the stop) versus reactive-reporting
+crimes like THEFT (14.2%) and BURGLARY (6.7%) where most cases go unsolved.
+Phase B's ML model exploits this structure.
 
 ---
+
+# Phase B — MLlib arrest predictor (5% sample)
 
 ## Task 5 — Feature pipeline
 *Saad Abdullah Al Sufayan (`Saad15111`)*
@@ -118,8 +179,6 @@ features, 80/20 split with `seed=42`. The 5% sample is applied before any featur
 engineering.
 
 Vector layout: `[Hour, District, ptype_idx, is_dom_idx]`.
-
----
 
 ## Task 6 — Train and evaluate three classifiers
 *Saad Abdullah Al Sufayan (`Saad15111`)*
@@ -139,11 +198,78 @@ Cluster results (5% sample of the full HDFS dataset):
 
 **Top model by AUC: GBT (0.8241).**
 
+## Task 7 — Random Forest feature importances
+*Fahad Sami Alhomaidhi (`fahadalhomaidhi8`)*
+
+```
+ptype_idx     0.7712  #####################################
+Hour          0.0807  ####
+District      0.0763  ####
+is_dom_idx    0.0718  ####
+```
+
+`ptype_idx` dominates because the per-crime arrest-rate distribution from Task 4
+is itself dominated by crime type (NARCOTICS ≈ 99% vs THEFT ≈ 14%). Once a tree
+splits on the crime-type index it has most of its answer.
+
+Logistic Regression underperforms the tree models because it treats `ptype_idx`
+as a numeric feature and fits a single linear coefficient — implying a meaningless
+ordering between crime types. Trees split on individual values of the index and
+side-step that issue entirely.
+
 ---
 
 # Phase C — Deployment evidence
 
----
+## Task 9 — Local execution
+*Fahad Sami Alhomaidhi (`fahadalhomaidhi8`)*
+
+Notebook executed end-to-end with `jupyter nbconvert --execute` (Python 3.9, PySpark
+3.5.1, Java 17). Section 1 prints:
+
+```
+Running on:     local
+Spark version:  3.5.1
+Spark master:   local[*]
+```
+
+10,000 rows generated in-memory by the W09B-style synthetic generator. All Tasks
+1–7 ran; outputs are embedded in `M2_Spark_ML.ipynb`.
+
+## Task 10 — Cluster execution: client mode
+*Fahad Sami Alhomaidhi (`fahadalhomaidhi8`)*
+
+```bash
+fsalhomaidhi@master-node:~$ source /etc/profile.d/hadoop.sh
+fsalhomaidhi@master-node:~$ source /etc/profile.d/spark.sh
+fsalhomaidhi@master-node:~$ spark-submit --master yarn --deploy-mode client \
+    --num-executors 2 --executor-memory 768m --executor-cores 1 \
+    --driver-memory 1g notebook_runner.py
+```
+
+Excerpt from `output/cluster_yarn_log.txt`:
+
+```
+Running on:     cluster
+Spark version:  3.5.4
+Spark master:   yarn
+Records ingested: 793,073
+Phase B working set: 39,534 rows  (5% sample, seed=42)
+Train rows: 31,728 | Test rows: 7,806
+
+@@ training LogisticRegression
+  AUC       0.6022
+  Train(s)  19.5
+@@ training RandomForest
+  AUC       0.8073
+  Train(s)  32.0
+@@ training GBT
+  AUC       0.8241
+  Train(s)  466.9
+Top model by AUC: GBT (0.8241)
+```
+
+YARN application: `application_1778738889964_0087`.
 
 ## Task 11 — spark-submit (cluster mode)
 *Saad Abdullah Al Sufayan (`Saad15111`)*
